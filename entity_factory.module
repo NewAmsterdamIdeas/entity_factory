@@ -1,0 +1,710 @@
+<?php
+/**
+ * @file
+ * This is the file description for Entity Factory module.
+ *
+ * This module takes schema definitions from schema.org and
+ * uses them to define Drupal content types and other entities.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function entity_factory_menu() {
+  $items['admin/config/services/entity_factory_templates'] = array(
+    'title'            => 'Schema.org templates',
+    'description'      => 'Import templates from schema.org.',
+    'page callback'    => 'drupal_get_form',
+    'page arguments'   => array('entity_factory_template_import_form'),
+    'access arguments' => array('administer content types'),
+  );
+
+/*
+  $items['admin/entity_factory/create/%'] = array(
+    'title'            => 'Create content type from schema',
+    'description'      => 'Create a new Drupal content type based on an existing schema on schema.org.',
+    'page callback'    => 'drupal_get_form',
+    'page arguments'   => array('entity_factory_create', 3),
+    'access arguments' => array('administer content types'),
+  );
+  // Create tabs for all possible bundles.
+  foreach (entity_get_info() as $entity_type => $entity_info) {
+    if ($entity_info['fieldable']) {
+      foreach ($entity_info['bundles'] as $bundle_name => $bundle_info) {
+        if (isset($bundle_info['admin'])) {
+          // Extract path information from the bundle.
+          $path = $bundle_info['admin']['path'];
+          // Different bundles can appear on the same path (e.g. %node_type and
+          // %comment_node_type). To allow field_ui_menu_load() to extract the
+          // actual bundle object from the translated menu router path
+          // arguments, we need to identify the argument position of the bundle
+          // name string ('bundle argument') and pass that position to the menu
+          // loader. The position needs to be casted into a string; otherwise it
+          // would be replaced with the bundle name string.
+          if (isset($bundle_info['admin']['bundle argument'])) {
+            $bundle_arg = $bundle_info['admin']['bundle argument'];
+          }
+          else {
+            $bundle_arg = $bundle_name;
+          }
+          // This is the position of the %entity_factory_schema placeholder in the
+          // items below.
+          $field_position = count(explode('/', $path)) + 2;
+
+          // Extract access information, providing defaults.
+          $access = array_intersect_key($bundle_info['admin'], drupal_map_assoc(array('access callback', 'access arguments')));
+          $access += array(
+            'access callback' => 'user_access',
+            'access arguments' => array('administer site configuration'),
+          );
+          $items["$path/fields/schema"] = array(
+            'title' => 'Make fields from schema',
+            'page callback' => 'drupal_get_form',
+            'page arguments' => array('entity_factory_field_overview_form', $entity_type, $bundle_arg),
+            'type' => MENU_LOCAL_TASK,
+            'weight' => 1,
+            'file' => 'entity_factory.admin.inc',
+          ) + $access;
+
+          $items["$path/fields/schema/%entity_factory_schema"] = array(
+            'title' => 'Make fields from schema',
+            'page callback' => 'drupal_get_form',
+            'page arguments' => array('entity_factory_field_overview_form', $entity_type, $bundle_arg, $field_position),
+//            'type' => MENU_LOCAL_TASK,
+            'weight' => 1,
+            'file' => 'entity_factory.admin.inc',
+          ) + $access;
+
+        }
+      }
+    }
+  }
+*/
+  return $items;
+}
+
+function entity_factory_form_field_ui_field_overview_form_alter(&$form, &$form_state, $form_id) {
+  require_once DRUPAL_ROOT . '/modules/field_ui/field_ui.admin.inc';
+  $entity_type = $form['#entity_type'];
+  $bundle = $form['#bundle'];
+  $schema_name = schemaorg_ui_term_load($entity_type, $bundle, 'rdftype');
+  if (!$schema_name) {
+    return;
+  }
+  $schema = entity_factory_schema_load($schema_name);
+  if (!$schema) {
+    drupal_set_message(t("This entity's Schema.org setting is %schema, but the entity factory module couldn't find a schema with that name.", array('%schema' => $schema_name)));
+    return;
+  }
+  $form['fields']['#header'] = array(
+    t('Add?'),
+    t('Label'),
+    t('Weight'),
+    t('Parent'),
+    t('Machine name'),
+    t('Field type'),
+    t('Widget'),
+    array('data' => t('Operations/Help text'), 'colspan' => 2),
+  );
+  $form['fields']['#regions']['add_schema'] = array(
+    'title' => t('Fields based on the @schema schema', array('@schema' => $schema['name'])),
+  );
+
+  $keys_to_alter = array_merge($form['#fields'], array('title', '_add_new_field', '_add_existing_field'));
+  foreach ($keys_to_alter as $key) {
+    $row = $form['fields'][$key];
+    $add = array('add' => array(
+      '#markup' => '',
+    ));
+    $form['fields'][$key] = array_merge($add, $row);
+  }
+  
+  $table = array();
+  $max_weight = field_info_max_weight($entity_type, $bundle, 'form') + 2;
+  $field_type_options = field_ui_field_type_options();
+  $widget_type_options = field_ui_widget_type_options(NULL, TRUE);
+  
+  $schema_options_map = array(
+    'URL' => 'text',
+    'Text' => 'text_long',
+    'Number' => 'number_decimal',
+    'Integer' => 'number_integer',
+    'Date' => 'datetime',
+    'Boolean' => 'list_boolean',
+  );
+  
+  $field_name = $form['fields']['_add_new_field']['field_name'];
+  if ($field_type_options && $widget_type_options) {
+    foreach ($schema['properties'] as $machine_name_root => $properties) {
+      
+      $max_weight +=1;
+      $name = '_add_schema_field_' . $machine_name_root;
+      // Hackish fix to make field names work the same for versions of Drupal 7 prior to 7.14
+      if ($field_name['#type'] == 'machine_name') {
+        $field_name['#machine_name']['source'] = array('fields', $name, 'label');
+      }
+      if (isset($schema_options_map[$properties['field_type']])) {
+        $default_type_value = $schema_options_map[$properties['field_type']];
+      }
+      else {
+        $default_type_value = 'text';
+      }
+      
+      $form['fields'][$name] = array(
+        '#attributes' => array('class' => array('draggable', 'tabledrag-leaf', 'add-new')),
+        '#row_type' => 'add_schema_field',
+        '#region_callback' => 'entity_factory_field_overview_row_region',
+        'insertion' => array(
+          'add' => array(
+            '#type' => 'checkbox',
+            '#default_value' => FALSE,
+          ),
+          'schemaorg_field_property' => array(
+            '#type' => 'hidden',
+            '#default_value' => $properties['field_name'],
+          ),
+        ),
+        'label' => array(
+          '#type' => 'textfield',
+          '#default_value' => ucfirst(str_replace('_', ' ', $machine_name_root)),
+          '#title' => t('Schema field label'),
+          '#title_display' => 'invisible',
+          '#size' => 15,
+          '#description' => t('Label'),
+          '#prefix' => '<div class="label-input"><div class="add-new-placeholder">' . t('Add schema field') .'</div>',
+          '#suffix' => '</div>',
+        ),
+        'weight' => array(
+          '#type' => 'textfield',
+          '#default_value' => $max_weight,
+          '#size' => 3,
+          '#title_display' => 'invisible',
+          '#title' => t('Weight for schema field'),
+          '#attributes' => array('class' => array('field-weight')),
+          '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+        ),
+        'parent_wrapper' => array(
+          'parent' => array(
+            '#type' => 'select',
+            '#title' => t('Parent for schema field'),
+            '#title_display' => 'invisible',
+            '#options' => $form['fields']['#parent_options'],
+            '#empty_value' => '',
+            '#attributes' => array('class' => array('field-parent')),
+            '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+            '#parents' => array('fields', $name, 'parent'),
+          ),
+          'hidden_name' => array(
+            '#type' => 'hidden',
+            '#default_value' => $name,
+            '#attributes' => array('class' => array('field-name')),
+          ),
+        ),
+
+        'field_name' => $field_name,
+        'type' => array(
+          '#type' => 'select',
+//          '#title' => t('Type of schema field'),
+          '#title' => t('Schema property type @proptype:', array('@proptype' => $properties['field_type'])),
+          '#title_display' => 'invisible',
+          '#options' => $field_type_options,
+          '#empty_option' => t('- Select a field type -'),
+          '#default_value' => $default_type_value,
+          '#description' => t('Type of data to store.'),
+          '#attributes' => array('class' => array('field-type-select')),
+          '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+        ),
+        'widget_type' => array(
+          '#type' => 'select',
+          '#title' => t('Widget for schema field'),
+          '#title_display' => 'invisible',
+          '#options' => $widget_type_options,
+          '#empty_option' => t('- Select a widget -'),
+          '#description' => t('Form element to edit the data.'),
+          '#attributes' => array('class' => array('widget-type-select')),
+//          '#cell_attributes' => array('colspan' => 2),
+          '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+        ),
+        'description' => array(
+          '#type' => 'textarea',
+          '#title' => t('Help text'),
+          '#cell_attributes' => array('colspan' => 2),
+          '#default_value' => $properties['description'],
+        ),
+        // Place the 'translatable' property as an explicit value so that contrib
+        // modules can form_alter() the value for newly created fields.
+        'translatable' => array(
+          '#type' => 'value',
+          '#value' => FALSE,
+        ),
+
+      );
+    }
+  }
+  $form['#submit'][] = 'entity_factory_field_overview_form_submit'; 
+}
+
+function entity_factory_field_overview_form_submit($form, &$form_state) {
+  $form_values = $form_state['values']['fields'];
+  $entity_type = $form['#entity_type'];
+  $bundle = $form['#bundle'];
+  $admin_path = _field_ui_bundle_admin_path($entity_type, $bundle);
+  foreach($form_values as $key => $values) {
+    if ($form['fields'][$key]['#row_type'] == 'add_schema_field' && $values['insertion']['add']) {
+
+//      $destinations = array();
+
+      // Create new field.
+      $field = array();
+      if (!empty($values['field_name'])) {
+        $field = array(
+          'field_name' => $values['field_name'],
+          'type' => $values['type'],
+          'translatable' => $values['translatable'],
+        );
+        $instance = array(
+          'field_name' => $field['field_name'],
+          'entity_type' => $entity_type,
+          'bundle' => $bundle,
+          'label' => $values['label'],
+          'description' => $values['description'],
+          'widget' => array(
+            'type' => $values['widget_type'],
+            'weight' => $values['weight'],
+          ),
+        );
+
+        // Create the field and instance.
+        try {
+          field_create_field($field);
+          field_create_instance($instance);
+          entity_factory_schemaorg_add_mapping($values['insertion']['schemaorg_field_property'], $entity_type, $bundle, $values['field_name'], $values['type']);
+
+
+//          $destinations[] = $admin_path . '/fields/' . $field['field_name'] . '/field-settings';
+//          $destinations[] = $admin_path . '/fields/' . $field['field_name'];
+
+          // Store new field information for any additional submit handlers.
+          $form_state['fields_added'][$key] = $field['field_name'];
+        }
+        catch (Exception $e) {
+          drupal_set_message(t('There was a problem creating field %label: !message', array('%label' => $instance['label'], '!message' => $e->getMessage())), 'error');
+        }
+      }
+
+    }
+  }
+
+
+/*
+  // Add existing field.
+  if (!empty($form_values['_add_existing_field']['field_name'])) {
+    $values = $form_values['_add_existing_field'];
+    $field = field_info_field($values['field_name']);
+    if (!empty($field['locked'])) {
+      drupal_set_message(t('The field %label cannot be added because it is locked.', array('%label' => $values['label'])), 'error');
+    }
+    else {
+      $instance = array(
+        'field_name' => $field['field_name'],
+        'entity_type' => $entity_type,
+        'bundle' => $bundle,
+        'label' => $values['label'],
+        'widget' => array(
+          'type' => $values['widget_type'],
+          'weight' => $values['weight'],
+        ),
+      );
+
+      try {
+        field_create_instance($instance);
+        $destinations[] = $admin_path . '/fields/' . $instance['field_name'] . '/edit';
+        // Store new field information for any additional submit handlers.
+        $form_state['fields_added']['_add_existing_field'] = $instance['field_name'];
+      }
+      catch (Exception $e) {
+        drupal_set_message(t('There was a problem creating field instance %label: @message.', array('%label' => $instance['label'], '@message' => $e->getMessage())), 'error');
+      }
+    }
+  }
+*/
+/*
+  if ($destinations) {
+    $destination = drupal_get_destination();
+    $destinations[] = $destination['destination'];
+    unset($_GET['destination']);
+    $form_state['redirect'] = field_ui_get_destinations($destinations);
+  }
+  else {
+    drupal_set_message(t('Your settings have been saved.'));
+  }
+*/
+}
+
+
+function entity_factory_schemaorg_add_mapping($field_property, $entity_type, $bundle, $field_name, $field_type) {
+  $mapping = rdf_mapping_load($entity_type, $bundle);
+  // This field might not have an RDF mapping yet.
+  if (empty($mapping[$field_name])) {
+    $mapping[$field_name]['predicates'] = array();
+  }
+
+  $mapping[$field_name]['predicates'] = schemaorg_ui_terms_merge($field_property, $mapping[$field_name]['predicates']);
+
+  // Sets RDF mapping type in the case of fields where the object is a resource
+  // such as image, file, etc.
+  $rel_field_types = array('image', 'file', 'taxonomy_term_reference');
+  if (in_array($field_type, $rel_field_types)) {
+    $mapping[$field_name]['type'] = 'rel';
+  }
+
+  // Some terms from schema.org are not yet supported, and legacy properties
+  // are being used instead. The legacy property is added to the RDF mappings
+  // along with the official property.
+  $property = $field_property;
+  $legacy_properties = array(
+    'description' => 'summary',
+  );
+  if (array_key_exists($property, $legacy_properties)) {
+    array_unshift($mapping[$field_name]['predicates'], 'schema:' . $legacy_properties[$property]);
+  }
+
+  // Performs some maintenance tasks based on whether the mapping contains
+  // schema.org terms or not.
+  // Scans the mapping array to see if some fields are mapped to schema.org.
+  $schemaorg_mappings = FALSE;
+  // Some fields are ignored since they are not input by the user.
+  $ignored_fields = array('title', 'name', 'url');
+  foreach ($mapping as $field => $info) {
+    if (!empty($info['predicates']) && !in_array($field, $ignored_fields)) {
+      if (count($info['predicates']) != count(array_filter($info['predicates'], 'schemaorg_filter_schema_term'))) {
+        $schemaorg_mappings = TRUE;
+        break;
+      }
+    }
+  }
+  if ($schemaorg_mappings) {
+    // Specifies the title/name mapping as expected by schema.org. This mapping
+    // is always set to schema:name and is not exposed in the UI.
+    // The label of an entity is usually either 'title' (e.g. node) or
+    // 'name' (e.g. user).
+    if (!empty($mapping['title'])) {
+      $mapping['title']['predicates'] = array('schema:name');
+    }
+    if (!empty($mapping['name'])) {
+      $mapping['name']['predicates'] = array('schema:name');
+    }
+    // Sets the mapping for the url of the entity. This mapping is always set
+    // to schema:url and is not exposed in the UI.
+    $mapping['url']['predicates'] = array('schema:url');
+    $mapping['url']['type'] = 'rel';
+    // Add schema:Person type to user mapping.
+    if ($entity_type == 'user' && $bundle == 'user' ) {
+      $mapping['rdftype'] = schemaorg_ui_terms_merge('Person', $mapping['rdftype']);
+    }
+  }
+  else {
+    // Makes sure no schema.org mapping for title/name remains if no schema.org
+    // terms are used.
+    if (!empty($mapping['title'])) {
+      $mapping['title']['predicates'] = array_filter($mapping['title']['predicates'], 'schemaorg_filter_schema_term');
+    }
+    if (!empty($mapping['name'])) {
+      $mapping['name']['predicates'] = array_filter($mapping['name']['predicates'], 'schemaorg_filter_schema_term');
+    }
+    // Since this pseudo-field mapping is only used for the purpose of
+    // schema.org, it is entirely removed.
+    unset($mapping['url']);
+    // Remove schema.org type from the user mapping.
+    if ($entity_type == 'user' && $bundle == 'user' ) {
+      $mapping['rdftype'] = array_filter($mapping['rdftype'], 'schemaorg_filter_schema_term');
+    }
+  }
+
+  rdf_mapping_save(array(
+    'type' => $entity_type,
+    'bundle' => $bundle,
+    'mapping' => $mapping,
+    )
+  );
+}
+
+function entity_factory_field_overview_row_region($row) {
+  switch ($row['#row_type']) {
+    case 'field':
+    case 'extra_field':
+      return 'main';
+    case 'add_schema_field':
+      return 'add_schema';
+    case 'add_new_field':
+      // If no input in 'label', assume the row has not been dragged out of the
+      // 'add new' section.
+      return (!empty($row['label']['#value']) ? 'main' : 'add_new');
+  }
+}
+
+function entity_factory_schema_load($schema_name) {
+  if (!$schema_name) {
+    return FALSE;
+  }
+  $schemas_path = DRUPAL_ROOT . '/' . drupal_get_path('module', 'entity_factory') . '/schemas';
+  if ($handle = fopen("$schemas_path/$schema_name",'r')) {
+    if (is_resource($handle)) {
+      $properties = array();
+      while (($buffer = fgets($handle)) !== false) {
+        list($field_name, $field_type, $description) = explode("\t", trim($buffer));
+        $properties[entity_factory_to_underscore($field_name)] = array(
+          'field_name' => trim($field_name),
+          'field_type' => trim($field_type),
+          'description' => trim($description),
+        );
+      }
+
+      return array(
+        'name' => $schema_name,
+        'properties' => $properties
+      );
+    }
+    fclose($handle);
+  }
+  return FALSE;
+}
+
+function entity_factory_create($form, &$form_state, $schema) {
+  drupal_set_title(t('<em>Create content type @title', array('@title' => $schema)), PASS_THROUGH);
+  $schemas_path = DRUPAL_ROOT . '/' . drupal_get_path('module', 'entity_factory') . '/schemas';
+  $form['fields'] = array(
+    '#prefix' => '<div id="fields">',
+    '#suffix' => '</div>',
+    '#tree' => TRUE,
+    '#theme' => 'table',
+    '#header' => array(t('Include?'), t('Field name'), t('Type'), t('Description')),
+    '#rows' => array(),
+  );
+
+  if ($handle = fopen("$schemas_path/$schema",'r')) {
+    if (is_resource($handle)) {
+      $i = 0;
+      require_once DRUPAL_ROOT . '/modules/field_ui/field_ui.admin.inc';
+      $field_type_options = field_ui_field_type_options();
+      $widget_type_options = field_ui_widget_type_options(NULL, TRUE);
+      // $existing_fields provides the list of existing field options, which is referenced by the Javascript attachment to this field widget selector. -- Sheldon
+//      $existing_fields = field_ui_existing_field_options('node', 'node');
+      while (($buffer = fgets($handle)) !== false) {
+        list($fieldname, $fieldtype, $description) = explode("\t", trim($buffer));
+
+        // Build the fields for this row in the table. We'll be adding
+        // these to the form several times, so it's easier if they are
+        // individual variables rather than in an array.
+        $fflag = array(
+          '#id' => 'fields-' . $i . '-fflag',
+          '#type' => 'checkbox',
+          '#default_value' => 1,
+//          '#default_value' => 1, // isset($fields[$i]) ? $fields[$i]['fflag'] : TRUE,
+        );
+        $fname = array(
+          '#id' => 'fields-' . $i . '-fname',
+          '#type' => 'textfield',
+          '#title' => t('Property @fieldname:', array('@fieldname' => $fieldname)),
+          '#default_value' => isset($fields[$i]) ? $fields[$i]['fname'] : entity_factory_to_underscore($fieldname),
+        );
+        $ftype = array(
+          'type' => array(
+            '#id' => 'fields-' . $i . '-ftype',
+            '#type' => 'select',
+            '#title' => t('Schema property type @proptype:', array('@proptype' => $fieldtype)),
+//            '#title_display' => 'invisible',
+            '#options' => $field_type_options,
+            '#empty_option' => t('- Select a field type -'),
+            '#description' => t('Type of data to store.'),
+            '#default_value' => isset($fields[$i]) ? $fields[$i]['ftype'] : NULL,
+            '#attributes' => array('class' => array('field-type-select')),
+            '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+          ),
+          'widget_type' => array(
+            '#id' => 'fields-' . $i . '-wtype',
+            '#type' => 'select',
+            '#title' => t('Widget for new field'),
+//            '#title_display' => 'invisible',
+            '#options' => $widget_type_options,
+            '#empty_option' => t('- Select a widget -'),
+            '#description' => t('Form element to edit the data.'),
+            '#attributes' => array('class' => array('widget-type-select')),
+            '#cell_attributes' => array('colspan' => 3),
+            '#prefix' => '<div class="add-new-placeholder">&nbsp;</div>',
+          ),
+        );
+        $fdesc = array(
+          '#id' => 'fields-' . $i . '-fdesc',
+          '#type' => 'textarea',
+          '#default_value' => isset($fields[$i]) ? $fields[$i]['fdesc'] : $description,
+        );
+        
+
+        // Include the fields so they'll be rendered and named
+        // correctly, but they'll be ignored here when rendering as
+        // we're using #theme => table.
+        //
+        // Note that we're using references to the variables, not just
+        // copying the values into the array.
+
+        $form['fields'][] = array(
+          'fname' => &$fflag,
+          'fname' => &$fname,
+          'ftype' => &$ftype,
+          'fdesc' => &$fdesc,
+        );
+
+        // Now add references to the fields to the rows that
+        // `theme_table()` will use.
+        //
+        // As we've used references, the table will use the very same
+        // field arrays as the FAPI used above.
+
+        $form['fields']['#rows'][] = array(
+          array('data' => &$fflag),
+          array('data' => &$fname),
+          array('data' => &$ftype),
+          array('data' => &$fdesc),
+        );
+
+        // Because we've used references we need to `unset()` our
+        // variables. If we don't then every iteration of the loop will
+        // just overwrite the variables we created the first time
+        // through leaving us with a form with 3 copies of the same fields.
+
+        unset($fflag);
+        unset($fname);
+        unset($ftype);
+        unset($fdesc);
+        $i++;
+      }
+    }
+    fclose($handle);
+
+/*
+    $form['#attached']['css'][] = drupal_get_path('module', 'field_ui') . '/field_ui.css';
+    $form['#attached']['js'][] = drupal_get_path('module', 'field_ui') . '/field_ui.js';
+
+    // Add settings for the update selects behavior.
+    $js_fields = array();
+    foreach ($existing_fields as $field_name => $info) {
+      $js_fields[$field_name] = array('label' => $info['label'], 'type' => $info['type'], 'widget' => $info['widget_type']);
+    }
+
+    $form['#attached']['js'][] = array(
+      'type' => 'setting',
+      'data' => array('fields' => $js_fields, 'fieldWidgetTypes' => field_ui_widget_type_options()),
+    );
+*/
+
+  }
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => 'Generate template',
+  );
+
+  return $form;
+}
+
+function entity_factory_template_import_form($form, &$form_state) {
+  $form['type'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Type'),
+    '#required' => TRUE,
+    '#description' => t('Specify the type you want to associated to this content type e.g. Article, Blog, etc.'),
+    '#attributes' => array('class' => array('schemaorg-autocomplete-types')),
+  );
+  $schemas_path = DRUPAL_ROOT . '/' . drupal_get_path('module', 'entity_factory') . '/schemas';
+  if ($handle = opendir($schemas_path)) {
+    while (false !== ($entry = readdir($handle))) {
+      if ($entry != '.' && $entry != '..') {
+        $handle2 = fopen("$schemas_path/$entry",'r');
+        if (is_resource($handle2)) {
+          $contents = fread($handle2,filesize("$schemas_path/$entry"));
+        }
+        fclose($handle2);
+        $result .=  $entry;
+      }
+    }
+    closedir($handle);
+  }
+  $folderPath  = drupal_realpath('public://');
+
+  $form['schemas'] = array(
+    '#markup' => 'Yo!',
+  );
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => 'Generate template',
+  );
+
+  return $form;
+}
+
+function entity_factory_template_import_form_submit($form, &$form_state) {
+  $data = json_decode(file_get_contents(DRUPAL_ROOT . '/' . drupal_get_path('module', 'schemaorg') . "/js/all.json"));
+  $schemaorg_type = $form_state['values']['type'];
+
+  $types = array(
+    array(
+      'type' => $schemaorg_type,
+      'name' => $data->types->$schemaorg_type->label,
+      'description' => $data->types->$schemaorg_type->comment_plain,
+      'base' => 'node_content',
+      'custom' => 1,
+      'modified' => 1,
+      'locked' => 0,
+    ),
+  );
+
+  foreach ($types as $type) {
+    $type = node_type_set_defaults($type);
+    node_type_save($type);
+  }
+
+  foreach ($data->types->$schemaorg_type->properties as $property) {
+    if (!field_info_field('field_sorg_' . strtolower($property))) {
+      $field = array(
+        'field_name' => 'field_sorg_' . strtolower($property),
+        'type' => 'text',
+      );
+      field_create_field($field);
+    }
+
+    $instance = array(
+      'field_name' => 'field_sorg_' . strtolower($property),
+      'entity_type' => 'node',
+      'label' => $property,
+      'bundle' => $schemaorg_type,
+      'description' => $data->properties->$property->comment_plain,
+      'widget' => array(
+        'type' => 'text_textfield',
+        'module' => 'text',
+      ),
+      'display' => array(
+        'default' => array(
+          'type' => 'text_default',
+          'module' => 'text',
+        ),
+      ),
+    );
+    field_create_instance($instance);
+  }
+
+  drupal_set_message('Built template for ' . $data->types->$schemaorg_type->label . ' from schema.org');
+}
+
+function entity_factory_to_camelcase($underscored_string, $capitalize_first_letter=FALSE) {
+  if ($capitalize_first_letter) {
+    return preg_replace('/(?:^|_)(.?)/e',"strtoupper('$1')",$underscored_string);
+  }
+  else {
+    return preg_replace('/_(.?)/e',"strtoupper('$1')",$underscored_string); 
+  }
+}
+
+function entity_factory_to_underscore($camelcase_string) {
+  return strtolower(preg_replace('/([^A-Z])([A-Z])/', "$1_$2", $camelcase_string)); 
+}

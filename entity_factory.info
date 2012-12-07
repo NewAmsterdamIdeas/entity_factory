@@ -1,0 +1,7 @@
+name = Entity Factory
+description = "Creates content types based on schema.org schemas"
+core = 7.x
+package = Other
+files[] = entity_factory.module
+files[] = entity_factory.admin.inc
+dependencies[] = schemaorg
